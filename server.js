@@ -1,71 +1,184 @@
-// server.js - Starter Express server for Week 2 assignment
-
-// Import required modules
 const express = require('express');
 const bodyParser = require('body-parser');
 const { v4: uuidv4 } = require('uuid');
+const { NotFoundError, ValidationError, AuthenticationError, DatabaseError } = require('./errors');
 
-// Initialize Express app
 const app = express();
-const PORT = process.env.PORT || 3000;
+const port = 3000;
 
-// Middleware setup
+// Middleware
 app.use(bodyParser.json());
 
-// Sample in-memory products database
-let products = [
-  {
-    id: '1',
-    name: 'Laptop',
-    description: 'High-performance laptop with 16GB RAM',
-    price: 1200,
-    category: 'electronics',
-    inStock: true
-  },
-  {
-    id: '2',
-    name: 'Smartphone',
-    description: 'Latest model with 128GB storage',
-    price: 800,
-    category: 'electronics',
-    inStock: true
-  },
-  {
-    id: '3',
-    name: 'Coffee Maker',
-    description: 'Programmable coffee maker with timer',
-    price: 50,
-    category: 'kitchen',
-    inStock: false
-  }
-];
+// Custom logger middleware
+const loggerMiddleware = (req, res, next) => {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] ${req.method} ${req.url}`);
+    next();
+};
 
-// Root route
+// Authentication middleware
+const authMiddleware = (req, res, next) => {
+    const apiKey = req.headers['x-api-key'];
+    if (!apiKey || apiKey !== 'your-secret-api-key') {
+        throw new AuthenticationError('Invalid API key');
+    }
+    next();
+};
+
+// Async handler wrapper
+const asyncHandler = (fn) => (req, res, next) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+};
+
+// Apply middleware
+app.use(loggerMiddleware);
+app.use('/api', authMiddleware);
+
+// In-memory products storage
+let products = [];
+
+// Validation middleware
+const validateProduct = (req, res, next) => {
+    const { name, description, price, category, inStock } = req.body;
+    
+    if (!name || !description || !price || !category || typeof inStock !== 'boolean') {
+        throw new ValidationError('All fields are required and must be of correct type');
+    }
+    
+    if (typeof price !== 'number' || price <= 0) {
+        throw new ValidationError('Price must be a positive number');
+    }
+    
+    next();
+};
+
+// Routes
 app.get('/', (req, res) => {
-  res.send('Welcome to the Product API! Go to /api/products to see all products.');
+    res.json({ message: 'Hello World!' });
 });
 
-// TODO: Implement the following routes:
-// GET /api/products - Get all products
-// GET /api/products/:id - Get a specific product
-// POST /api/products - Create a new product
-// PUT /api/products/:id - Update a product
-// DELETE /api/products/:id - Delete a product
+// GET all products with filtering and pagination
+app.get('/api/products', asyncHandler(async (req, res) => {
+    const { category, page = 1, limit = 10 } = req.query;
+    let filteredProducts = [...products];
+    
+    if (category) {
+        filteredProducts = filteredProducts.filter(p => p.category === category);
+    }
+    
+    const startIndex = (page - 1) * limit;
+    const endIndex = page * limit;
+    const paginatedProducts = filteredProducts.slice(startIndex, endIndex);
+    
+    res.json({
+        total: filteredProducts.length,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        products: paginatedProducts
+    });
+}));
 
-// Example route implementation for GET /api/products
-app.get('/api/products', (req, res) => {
-  res.json(products);
+// GET product by ID
+app.get('/api/products/:id', asyncHandler(async (req, res) => {
+    const product = products.find(p => p.id === req.params.id);
+    if (!product) {
+        throw new NotFoundError(`Product with ID ${req.params.id} not found`);
+    }
+    res.json(product);
+}));
+
+// POST new product
+app.post('/api/products', validateProduct, asyncHandler(async (req, res) => {
+    const newProduct = {
+        id: uuidv4(),
+        ...req.body
+    };
+    products.push(newProduct);
+    res.status(201).json(newProduct);
+}));
+
+// PUT update product
+app.put('/api/products/:id', validateProduct, asyncHandler(async (req, res) => {
+    const index = products.findIndex(p => p.id === req.params.id);
+    if (index === -1) {
+        throw new NotFoundError(`Product with ID ${req.params.id} not found`);
+    }
+    
+    products[index] = {
+        ...products[index],
+        ...req.body,
+        id: req.params.id
+    };
+    
+    res.json(products[index]);
+}));
+
+// DELETE product
+app.delete('/api/products/:id', asyncHandler(async (req, res) => {
+    const index = products.findIndex(p => p.id === req.params.id);
+    if (index === -1) {
+        throw new NotFoundError(`Product with ID ${req.params.id} not found`);
+    }
+    
+    products = products.filter(p => p.id !== req.params.id);
+    res.status(204).send();
+}));
+
+// Search products by name
+app.get('/api/products/search', asyncHandler(async (req, res) => {
+    const { name } = req.query;
+    if (!name) {
+        throw new ValidationError('Name parameter is required');
+    }
+    
+    const searchResults = products.filter(p => 
+        p.name.toLowerCase().includes(name.toLowerCase())
+    );
+    
+    res.json(searchResults);
+}));
+
+// Get product statistics
+app.get('/api/products/stats', asyncHandler(async (req, res) => {
+    const stats = {
+        totalProducts: products.length,
+        categories: {},
+        inStock: products.filter(p => p.inStock).length,
+        outOfStock: products.filter(p => !p.inStock).length
+    };
+    
+    products.forEach(product => {
+        stats.categories[product.category] = (stats.categories[product.category] || 0) + 1;
+    });
+    
+    res.json(stats);
+}));
+
+// Global error handling middleware
+app.use((err, req, res, next) => {
+    console.error(err.stack);
+
+    // Handle operational errors (our custom errors)
+    if (err.isOperational) {
+        return res.status(err.statusCode).json({
+            status: err.status,
+            message: err.message
+        });
+    }
+
+    // Handle programming or unknown errors
+    return res.status(500).json({
+        status: 'error',
+        message: 'Something went wrong!'
+    });
 });
 
-// TODO: Implement custom middleware for:
-// - Request logging
-// - Authentication
-// - Error handling
-
-// Start the server
-app.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
+// Handle 404 errors
+app.use((req, res, next) => {
+    next(new NotFoundError(`Can't find ${req.originalUrl} on this server!`));
 });
 
-// Export the app for testing purposes
-module.exports = app; 
+// Start server
+app.listen(port, () => {
+    console.log(`Server is running on http://localhost:${port}`);
+}); 
